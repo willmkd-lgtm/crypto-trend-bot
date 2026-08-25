@@ -1,8 +1,9 @@
-name: Hourly Crypto Trend Scan
+name: Crypto Trend Scan
 
 on:
   schedule:
-    - cron: '5 * * * *'   # 매시 5분 (정각 부하 회피)
+    # 4시간마다 (UTC 0/4/8/12/16/20 → KST 09/13/17/21/01/05시)
+    - cron: '5 */4 * * *'
   workflow_dispatch:
 
 jobs:
@@ -28,7 +29,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
-          CMC_API_KEY:          ${{ secrets.CMC_API_KEY }}
           REDDIT_CLIENT_ID:     ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           COINGECKO_API_KEY:    ${{ secrets.COINGECKO_API_KEY }}
