@@ -199,26 +199,42 @@ TRENDS24_REGIONS = ["", "united-states", "united-kingdom", "turkey",
                     "nigeria", "india", "brazil", "indonesia"]
 
 
-def _parse_trends24(page_html: str) -> list[tuple[str, Optional[str]]]:
-    """최신 스냅샷 한 개의 (트렌드명, 트윗수) 목록."""
+X_WINDOW_SEC = 4 * 3600     # 실행 주기와 맞춘다
+
+
+def _parse_trends24(page_html: str, window_sec: int = X_WINDOW_SEC) -> list[str]:
+    """최근 window_sec 안의 스냅샷들에서 트렌드명을 순위순으로 모은다.
+
+    페이지 한 장에 24시간치 시간별 스냅샷이 들어있으므로, 추가 요청 없이
+    실행 주기만큼 거슬러 읽는다. 최신 스냅샷이 앞에 오도록 순서를 유지하고
+    중복은 첫 등장(=가장 최근·가장 높은 순위) 기준으로 제거한다.
+    """
     body = re.sub(r"<style.*?</style>", "", page_html, flags=re.S)
-    # 타임라인의 첫 카드가 가장 최근 스냅샷
-    start = body.find("trend-card__list")
-    if start < 0:
+    # 스냅샷: <h3 ... data-timestamp=...> 뒤에 <ol class=trend-card__list>
+    snapshots = re.findall(
+        r"<h3 class=title data-timestamp=([0-9.]+)>.*?<ol class=trend-card__list>(.*?)</ol>",
+        body, re.S)
+    if not snapshots:
         return []
-    end = body.find("</ol>", start)
-    block = body[start:end if end > 0 else start + 20000]
-    out = []
-    for li in re.findall(r"<li>.*?</li>", block, re.S):
-        a = re.search(r'class=trend-link[^>]*>([^<]+)</a>', li)
-        if not a:
-            a = re.search(r"<a[^>]*>([^<]+)</a>", li)
-        if not a:
+    newest = max(float(ts) for ts, _ in snapshots)
+    cutoff = newest - window_sec
+
+    ordered: list[str] = []
+    seen: set = set()
+    for ts, block in snapshots:
+        if float(ts) < cutoff:
             continue
-        cnt = re.search(r'data-count="([^"]*)"', li)
-        out.append((html.unescape(a.group(1)).strip(),
-                    cnt.group(1) if cnt and cnt.group(1) else None))
-    return out
+        for li in re.findall(r"<li>.*?</li>", block, re.S):
+            a = (re.search(r"class=trend-link[^>]*>([^<]+)</a>", li)
+                 or re.search(r"<a[^>]*>([^<]+)</a>", li))
+            if not a:
+                continue
+            term = html.unescape(a.group(1)).strip()
+            key = term.lower()
+            if term and key not in seen:
+                seen.add(key)
+                ordered.append(term)
+    return ordered
 
 
 CASHTAG_LOOKUP_BUDGET = 6      # 회당 CoinGecko 검색 호출 상한(레이트리밋 보호)
@@ -315,7 +331,7 @@ def fetch_x_trending(universe: dict, matchers: tuple) -> tuple[list[str], dict]:
                 continue
             ok_regions += 1
             n = len(trends)
-            for i, (term, _count) in enumerate(trends):
+            for i, term in enumerate(trends):
                 for sym in match_trend_term(term, universe, budget):
                     seen[sym] += (n - i) / n     # 트렌드 상위일수록 가중
                     label.setdefault(sym, term)
