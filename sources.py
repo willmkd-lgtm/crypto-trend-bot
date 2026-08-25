@@ -344,25 +344,86 @@ def fetch_x_trending(universe: dict) -> tuple[list[str], dict]:
     return [s for s, _ in seen.most_common(TOP_N)], label
 
 
-# ── 5. Reddit (OAuth 필요) ───────────────────────────────────────────────
-# 공개 JSON(/r/*/new.json)은 2026년 기준 로그인으로 302 리다이렉트된다. 실측 확인.
+# ── 5. Reddit ────────────────────────────────────────────────────────────
+# 공개 JSON(/r/*/new.json)은 로그인으로 302 리다이렉트되고, 셀프서비스 API 키
+# 발급도 2026년에 폐지돼 create-app이 조용히 실패한다(둘 다 실측 확인).
+# 남은 무자격증명 경로는 RSS 뿐이라 그쪽을 기본으로 쓴다.
 
 REDDIT_SUBS = ["CryptoCurrency", "CryptoMoonShots", "Bitcoin", "ethereum",
                "altcoin", "SatoshiStreetBets", "binance"]
 REDDIT_WINDOW_SEC = 4 * 3600 + 600      # 실행 주기(4h)보다 살짝 여유
 
 
+def _reddit_rss_entries(sub: str) -> list[tuple[str, Optional[float]]]:
+    """서브레딧 최신글 RSS. 반환: [(텍스트, epoch초 or None)].
+
+    Reddit은 2026년에 셀프서비스 API 키 발급을 없앴고 create-app이 조용히
+    실패한다. 반면 RSS는 자격증명 없이 열려 있다. 다만 레이트리밋이 빡빡하고
+    (일반 브라우저 UA는 오히려 429가 잘 뜬다) 정직한 UA가 더 잘 통과한다.
+    """
+    url = f"https://www.reddit.com/r/{sub}/new.rss"
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers={"User-Agent": HTTP_UA}, timeout=25)
+            if r.status_code == 429:
+                if attempt < 2:
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                print(f"[reddit] r/{sub} 레이트리밋(429)", file=sys.stderr)
+                return []
+            r.raise_for_status()
+            out = []
+            for e in re.findall(r"<entry>(.*?)</entry>", r.text, re.S):
+                title = re.search(r"<title>(.*?)</title>", e, re.S)
+                content = re.search(r"<content[^>]*>(.*?)</content>", e, re.S)
+                updated = re.search(r"<updated>([^<]+)</updated>", e)
+                raw = " ".join(x.group(1) for x in (title, content) if x)
+                text = html.unescape(html.unescape(raw))
+                text = re.sub(r"<[^>]+>", " ", text)      # 본문이 HTML로 이스케이프돼 옴
+                ts = None
+                if updated:
+                    try:
+                        from datetime import datetime
+                        ts = datetime.fromisoformat(
+                            updated.group(1).replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        pass
+                out.append((text, ts))
+            return out
+        except Exception as e:
+            print(f"[reddit] r/{sub} 실패: {e}", file=sys.stderr)
+            return []
+    return []
+
+
+def fetch_reddit_rss(universe: dict, matchers: tuple) -> list[str]:
+    """자격증명 없이 RSS로 언급량 집계."""
+    cutoff = time.time() - REDDIT_WINDOW_SEC
+    counts: Counter = Counter()
+    scanned = 0
+    for sub in REDDIT_SUBS:
+        for text, ts in _reddit_rss_entries(sub):
+            if ts is not None and ts < cutoff:
+                continue           # 타임스탬프가 없으면 최신 25건이므로 그냥 센다
+            scanned += 1
+            for sym in find_mentions(text, universe, matchers):
+                counts[sym] += 1
+        time.sleep(4)              # 무인증 RSS는 분당 요청 제한이 빡빡하다
+    print(f"[reddit] RSS로 글 {scanned}건 스캔", file=sys.stderr)
+    return [s for s, _ in counts.most_common(TOP_N)]
+
+
 def fetch_reddit(universe: dict, matchers: tuple) -> list[str]:
+    """자격증명이 있으면 API(본문·댓글수까지), 없으면 RSS로 폴백."""
     cid = os.environ.get("REDDIT_CLIENT_ID")
     sec = os.environ.get("REDDIT_CLIENT_SECRET")
     if not cid or not sec:
-        print("[reddit] 자격증명 없음 — 스킵", file=sys.stderr)
-        return []
+        return fetch_reddit_rss(universe, matchers)
     try:
         import praw
     except ImportError:
-        print("[reddit] praw 미설치 — 스킵", file=sys.stderr)
-        return []
+        print("[reddit] praw 미설치 — RSS로 폴백", file=sys.stderr)
+        return fetch_reddit_rss(universe, matchers)
     try:
         reddit = praw.Reddit(client_id=cid, client_secret=sec, user_agent=HTTP_UA)
         reddit.read_only = True
