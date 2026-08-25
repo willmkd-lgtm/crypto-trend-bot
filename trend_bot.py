@@ -105,10 +105,12 @@ def main() -> int:
         print("시세 데이터를 못 받아옴 — 발송 스킵", file=sys.stderr)
         return 1
 
-    cg_trending = S.fetch_cg_trending(universe)     # universe를 채워넣으므로 먼저
-    matchers = S.build_matchers(universe)
+    # 이 둘은 universe에 새 코인을 채워넣으므로 matchers보다 먼저 돌려야 한다.
+    # (X트렌딩이 캐시태그로 해소한 소형 코인도 Reddit·/biz/ 본문에서 잡히도록)
+    cg_trending = S.fetch_cg_trending(universe)
+    x_ranked, x_labels = S.fetch_x_trending(universe)
 
-    x_ranked, x_labels = S.fetch_x_trending(universe, matchers)
+    matchers = S.build_matchers(universe)
     reddit_ranked = S.fetch_reddit(universe, matchers)
     biz_ranked = S.fetch_biz(universe, matchers)
     turnover_ranked, turnovers = S.rank_by_turnover(universe)

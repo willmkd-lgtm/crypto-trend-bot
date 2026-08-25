@@ -311,7 +311,7 @@ def match_trend_term(term: str, universe: dict, budget: Optional[list] = None) -
     return hits
 
 
-def fetch_x_trending(universe: dict, matchers: tuple) -> tuple[list[str], dict]:
+def fetch_x_trending(universe: dict) -> tuple[list[str], dict]:
     """X 트렌딩에 등장한 코인. 반환: (ranked, {sym: 트렌드표기})."""
     seen: Counter = Counter()
     label: dict = {}
