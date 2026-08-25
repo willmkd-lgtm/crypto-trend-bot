@@ -349,19 +349,26 @@ def fetch_x_trending(universe: dict) -> tuple[list[str], dict]:
 # 발급도 2026년에 폐지돼 create-app이 조용히 실패한다(둘 다 실측 확인).
 # 남은 무자격증명 경로는 RSS 뿐이라 그쪽을 기본으로 쓴다.
 
-REDDIT_SUBS = ["CryptoCurrency", "CryptoMoonShots", "Bitcoin", "ethereum",
-               "altcoin", "SatoshiStreetBets", "binance"]
+# Reddit은 r/A+B+C 결합 피드를 지원한다. 서브레딧마다 따로 요청하면 무인증
+# 레이트리밋(429)에 금방 걸리므로 묶어서 요청 수를 줄인다. 다만 한 피드에
+# 다 몰면 트래픽 큰 서브레딧이 25건을 독식해 소형 커뮤니티가 사라지기 때문에,
+# 대형/소형을 갈라 각자 몫을 갖게 한다.
+REDDIT_SUB_GROUPS = [
+    ["CryptoCurrency", "Bitcoin", "ethereum"],
+    ["CryptoMoonShots", "SatoshiStreetBets", "altcoin", "binance"],
+]
 REDDIT_WINDOW_SEC = 4 * 3600 + 600      # 실행 주기(4h)보다 살짝 여유
 
 
-def _reddit_rss_entries(sub: str) -> list[tuple[str, Optional[float]]]:
-    """서브레딧 최신글 RSS. 반환: [(텍스트, epoch초 or None)].
+def _reddit_rss_entries(subs: list[str]) -> list[tuple[str, Optional[float]]]:
+    """서브레딧 묶음의 최신글 RSS. 반환: [(텍스트, epoch초 or None)].
 
     Reddit은 2026년에 셀프서비스 API 키 발급을 없앴고 create-app이 조용히
     실패한다. 반면 RSS는 자격증명 없이 열려 있다. 다만 레이트리밋이 빡빡하고
     (일반 브라우저 UA는 오히려 429가 잘 뜬다) 정직한 UA가 더 잘 통과한다.
     """
-    url = f"https://www.reddit.com/r/{sub}/new.rss"
+    label = "+".join(subs)
+    url = f"https://www.reddit.com/r/{label}/new.rss"
     for attempt in range(3):
         try:
             r = requests.get(url, headers={"User-Agent": HTTP_UA}, timeout=25)
@@ -369,7 +376,7 @@ def _reddit_rss_entries(sub: str) -> list[tuple[str, Optional[float]]]:
                 if attempt < 2:
                     time.sleep(10 * (attempt + 1))
                     continue
-                print(f"[reddit] r/{sub} 레이트리밋(429)", file=sys.stderr)
+                print(f"[reddit] {label} 레이트리밋(429)", file=sys.stderr)
                 return []
             r.raise_for_status()
             out = []
@@ -391,7 +398,7 @@ def _reddit_rss_entries(sub: str) -> list[tuple[str, Optional[float]]]:
                 out.append((text, ts))
             return out
         except Exception as e:
-            print(f"[reddit] r/{sub} 실패: {e}", file=sys.stderr)
+            print(f"[reddit] {label} 실패: {e}", file=sys.stderr)
             return []
     return []
 
@@ -401,8 +408,8 @@ def fetch_reddit_rss(universe: dict, matchers: tuple) -> list[str]:
     cutoff = time.time() - REDDIT_WINDOW_SEC
     counts: Counter = Counter()
     scanned = 0
-    for sub in REDDIT_SUBS:
-        for text, ts in _reddit_rss_entries(sub):
+    for group in REDDIT_SUB_GROUPS:
+        for text, ts in _reddit_rss_entries(group):
             if ts is not None and ts < cutoff:
                 continue           # 타임스탬프가 없으면 최신 25건이므로 그냥 센다
             scanned += 1
@@ -430,7 +437,7 @@ def fetch_reddit(universe: dict, matchers: tuple) -> list[str]:
         cutoff = time.time() - REDDIT_WINDOW_SEC
         counts: Counter = Counter()
         scanned = 0
-        for sub in REDDIT_SUBS:
+        for sub in [s for group in REDDIT_SUB_GROUPS for s in group]:
             try:
                 for post in reddit.subreddit(sub).new(limit=100):
                     if post.created_utc < cutoff:
