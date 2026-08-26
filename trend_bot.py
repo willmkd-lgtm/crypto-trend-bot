@@ -13,10 +13,12 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import requests
 
@@ -43,6 +45,44 @@ SOURCE_WEIGHTS = {
 }
 
 
+STATE_PATH = Path(__file__).with_name("state") / "latest.json"
+RANK_JUMP = 3       # 이만큼 이상 움직여야 화살표를 붙인다(자잘한 진동은 무시)
+
+
+def load_previous() -> dict:
+    """직전 실행의 {symbol: 순위}. 첫 실행이거나 파일이 깨졌으면 빈 dict."""
+    try:
+        with STATE_PATH.open(encoding="utf-8") as f:
+            return json.load(f).get("ranking", {})
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[state] 이전 상태 읽기 실패({e}) — 변화 표시 없이 진행", file=sys.stderr)
+        return {}
+
+
+def save_current(top: list) -> None:
+    ranking = {sym: i for i, (sym, _score) in enumerate(top, 1)}
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"updated_at": datetime.now(KST).isoformat(), "ranking": ranking}
+    with STATE_PATH.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def change_marker(sym: str, now_rank: int, previous: dict) -> str:
+    """직전 대비 변화 표시. 이전 상태가 없으면(첫 실행) 아무것도 안 붙인다."""
+    if not previous:
+        return ""
+    if sym not in previous:
+        return "🆕 "
+    delta = previous[sym] - now_rank      # 양수 = 순위 상승
+    if delta >= RANK_JUMP:
+        return f"⬆️{previous[sym]}→{now_rank} "
+    if -delta >= RANK_JUMP:
+        return f"⬇️{previous[sym]}→{now_rank} "
+    return ""
+
+
 def borda_merge(sources: list[tuple[str, list[str]]]) -> tuple[list, dict]:
     """소스별 순위를 0~1로 정규화해 가중 합산. 리스트 길이 차이를 상쇄한다."""
     scores: defaultdict = defaultdict(float)
@@ -57,10 +97,18 @@ def borda_merge(sources: list[tuple[str, list[str]]]) -> tuple[list, dict]:
     return ordered, tags
 
 
-def build_message(top, universe, tags, turnovers, x_labels, source_labels) -> str:
+def build_message(top, universe, tags, turnovers, x_labels, source_labels,
+                  previous) -> str:
     now = datetime.now(KST).strftime("%m-%d %H:%M")
     social = {"X트렌딩", "Reddit", "/biz/"}
-    lines = [f"🔥 코인 관심도 트렌드 TOP {len(top)}  ({now} KST)", ""]
+    lines = [f"🔥 코인 관심도 트렌드 TOP {len(top)}  ({now} KST)"]
+
+    newcomers = [s for s, _ in top if previous and s not in previous]
+    if newcomers:
+        lines.append(f"🆕 신규 진입 {len(newcomers)}종: "
+                     + ", ".join(universe.get(s, {}).get("name", s) for s in newcomers[:5]))
+    lines.append("")
+
     for i, (sym, _score) in enumerate(top, 1):
         info = universe.get(sym, {})
         name = info.get("name", sym)
@@ -70,7 +118,8 @@ def build_message(top, universe, tags, turnovers, x_labels, source_labels) -> st
         rank_txt = f" #{rank}" if rank else ""
         # 소셜에서 실제로 회자된 종목은 눈에 띄게
         mark = "🗣 " if social & set(tags.get(sym, [])) else ""
-        lines.append(f"{i}. {mark}{name} ({sym}){rank_txt}{chg_txt}")
+        move = change_marker(sym, i, previous)
+        lines.append(f"{i}. {move}{mark}{name} ({sym}){rank_txt}{chg_txt}")
 
         why = []
         for t in tags.get(sym, []):
@@ -81,8 +130,10 @@ def build_message(top, universe, tags, turnovers, x_labels, source_labels) -> st
             else:
                 why.append(t)
         lines.append(f"    └ {' · '.join(why)}")
-    lines += ["", f"소스: {' + '.join(source_labels)}",
-              "🗣 = SNS에서 실제 언급 포착"]
+    legend = "🗣 = SNS 실언급 포착"
+    if previous:
+        legend += f" · 🆕 신규 · ⬆️⬇️ = {RANK_JUMP}계단 이상 이동"
+    lines += ["", f"소스: {' + '.join(source_labels)}", legend]
     return "\n".join(lines)
 
 
@@ -129,8 +180,9 @@ def main() -> int:
 
     ordered, tags = borda_merge(sources)
     top = ordered[:TOP_N]
+    previous = load_previous()
     msg = build_message(top, universe, tags, turnovers, x_labels,
-                        [s[0] for s in sources])
+                        [s[0] for s in sources], previous)
     print(msg)
 
     if os.environ.get("DRY_RUN") == "1":
@@ -139,6 +191,9 @@ def main() -> int:
 
     send_telegram(msg)
     print("sent.", file=sys.stderr)
+    # 발송에 성공한 뒤에만 갱신한다. 실패했는데 저장하면 다음 회차가
+    # 사용자가 본 적 없는 순위를 기준으로 변화를 계산하게 된다.
+    save_current(top)
     return 0
 
 
